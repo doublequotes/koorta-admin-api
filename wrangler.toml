@@ -1,0 +1,10 @@
+name = "garment-admin-api"
+main = "src/index.js"
+compatibility_date = "2026-08-02"
+
+[vars]
+R2_PUBLIC_BASE_URL = "https://garment-bucket.koorta.com"
+
+[[r2_buckets]]
+binding = "GARMENT_BUCKET"
+bucket_name = "garment-catalog"
