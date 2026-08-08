@@ -91,25 +91,59 @@ async function uploadImage(bucket, env, file, categoryId, productId) {
     cacheControl: 'public, max-age=31536000, immutable',
   });
 
+  const baseValue = env.R2_PUBLIC_BASE_URL || env.PUBLIC_BASE_URL || '';
+  const base = String(baseValue).replace(/\/$/, '');
+
   return {
     objectKey,
-    publicUrl: `${env.R2_PUBLIC_BASE_URL.replace(/\/$/, '')}/${objectKey.replace(/^\/+/, '')}`,
+    publicUrl: base ? `${base}/${objectKey.replace(/^\/+/, '')}` : objectKey,
   };
+}
+
+async function deleteImageIfNeeded(bucket, previousImageKey, nextImageKey) {
+  if (!previousImageKey || !nextImageKey || previousImageKey === nextImageKey) return;
+  await bucket.delete(previousImageKey);
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    console.log('[worker] request received', {
+      method: request.method,
+      pathname: url.pathname,
+      host: url.host,
+      headers: Object.fromEntries(request.headers.entries()),
+    });
+
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
     if (!env.GARMENT_BUCKET) {
+      console.error('[worker] GARMENT_BUCKET binding missing');
       return jsonResponse({ success: false, error: 'The GARMENT_BUCKET binding is missing.' }, 500);
     }
 
+    const bucket = env.GARMENT_BUCKET;
+    console.log('[worker] bucket binding available');
+    const pathname = normalizeRoute(url.pathname);
+
+    if (request.method === 'GET' && pathname === '/catalog') {
+      console.log('[worker] GET /catalog');
+      const products = await readCatalog(bucket);
+      console.log('[worker] catalog read result', { count: products.length });
+      return jsonResponse(products, 200);
+    }
+
+    if (request.method === 'GET' && pathname === '/') {
+      console.log('[worker] health check');
+      return jsonResponse({ ok: true, message: 'garment-admin-api worker is running.' }, 200);
+    }
+
     const providedSecret = request.headers.get('X-Admin-Secret') || '';
+    console.log('[worker] auth check', { providedSecretLength: providedSecret.length, expectedSecretLength: String(env.ADMIN_SECRET_KEY || '').length });
     if (providedSecret !== env.ADMIN_SECRET_KEY) {
+      console.warn('[worker] unauthorized request');
       return jsonResponse({ success: false, error: 'Unauthorized' }, 401);
     }
 
@@ -117,11 +151,10 @@ export default {
       return jsonResponse({ success: false, error: 'Method not allowed' }, 405);
     }
 
-    const bucket = env.GARMENT_BUCKET;
-    const pathname = normalizeRoute(url.pathname);
-
     if (pathname === '/add-product') {
+      console.log('[worker] route /add-product');
       const body = await parseBody(request);
+      console.log('[worker] parsed body type', body.type);
       if (body.type === 'none') {
         return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400);
       }
@@ -140,6 +173,7 @@ export default {
         .filter(Boolean);
 
       const products = await readCatalog(bucket);
+      console.log('[worker] existing catalog count before add', { count: products.length });
       const product = { id, name, category, categoryId, price, description, sizes, image: '', imageKey: '' };
 
       if (file && typeof file === 'object' && 'arrayBuffer' in file) {
@@ -149,18 +183,96 @@ export default {
       }
 
       products.push(product);
+      console.log('[worker] writing catalog');
       await writeCatalog(bucket, products);
+      console.log('[worker] catalog written successfully');
       return jsonResponse({ success: true, product, products });
     }
 
     if (pathname === '/edit-product') {
-      return jsonResponse({ success: false, error: 'Edit not implemented in this template' }, 501);
+      console.log('[worker] route /edit-product');
+      const body = await parseBody(request);
+      console.log('[worker] parsed edit body type', body.type);
+      if (body.type === 'none') {
+        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400);
+      }
+
+      const data = body.value;
+      const file = body.type === 'formData' ? data.get('image') : null;
+      const id = String(getBodyValue(data, 'id') || '').trim();
+      const name = String(getBodyValue(data, 'name') || '').trim();
+      const category = String(getBodyValue(data, 'category') || '').trim();
+      const categoryId = String(getBodyValue(data, 'categoryId') || '').trim();
+      const description = String(getBodyValue(data, 'description') || '').trim();
+      const price = Number(getBodyValue(data, 'price') || 0);
+      const sizes = String(getBodyValue(data, 'sizes') || '')
+        .split(',')
+        .map((size) => size.trim())
+        .filter(Boolean);
+      const existingImageKey = String(getBodyValue(data, 'imageKey') || '').trim();
+
+      const products = await readCatalog(bucket);
+      console.log('[worker] existing catalog count before edit', { count: products.length, id });
+      const index = products.findIndex((item) => item.id === id);
+      if (index < 0) {
+        return jsonResponse({ success: false, error: 'Product not found' }, 404);
+      }
+
+      const nextProduct = {
+        ...products[index],
+        id,
+        name,
+        category,
+        categoryId,
+        price,
+        description,
+        sizes,
+      };
+
+      if (file && typeof file === 'object' && 'arrayBuffer' in file) {
+        const upload = await uploadImage(bucket, env, file, categoryId, id);
+        nextProduct.image = upload.publicUrl;
+        nextProduct.imageKey = upload.objectKey;
+        await deleteImageIfNeeded(bucket, existingImageKey, upload.objectKey);
+      } else {
+        nextProduct.image = products[index].image || '';
+        nextProduct.imageKey = products[index].imageKey || '';
+      }
+
+      products[index] = nextProduct;
+      console.log('[worker] writing catalog after edit');
+      await writeCatalog(bucket, products);
+      console.log('[worker] catalog written after edit');
+      return jsonResponse({ success: true, product: nextProduct, products });
     }
 
     if (pathname === '/delete-product') {
-      return jsonResponse({ success: false, error: 'Delete not implemented in this template' }, 501);
+      console.log('[worker] route /delete-product');
+      const body = await parseBody(request);
+      console.log('[worker] parsed delete body type', body.type);
+      if (body.type === 'none') {
+        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400);
+      }
+
+      const data = body.value;
+      const id = String(getBodyValue(data, 'id') || '').trim();
+      const products = await readCatalog(bucket);
+      console.log('[worker] existing catalog count before delete', { count: products.length, id });
+      const productToDelete = products.find((item) => item.id === id);
+
+      if (!productToDelete) {
+        return jsonResponse({ success: false, error: 'Product not found' }, 404);
+      }
+
+      const nextProducts = products.filter((item) => item.id !== id);
+      console.log('[worker] writing catalog after delete');
+      await writeCatalog(bucket, nextProducts);
+      console.log('[worker] catalog written after delete');
+      await deleteImageIfNeeded(bucket, productToDelete.imageKey, '');
+      return jsonResponse({ success: true, product: productToDelete, products: nextProducts });
     }
 
+    console.warn('[worker] route not found', { pathname });
     return jsonResponse({ success: false, error: 'Not found' }, 404);
   },
 };
