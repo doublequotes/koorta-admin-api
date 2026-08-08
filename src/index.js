@@ -317,8 +317,84 @@ export default {
       console.log('[worker] writing catalog after delete');
       await writeCatalog(bucket, nextProducts);
       console.log('[worker] catalog written after delete');
-      await deleteImageIfNeeded(bucket, productToDelete.imageKey, '');
+      const keysToDelete = [
+        ...(Array.isArray(productToDelete.imageKeys) ? productToDelete.imageKeys : []),
+        ...(productToDelete.imageKey ? [productToDelete.imageKey] : []),
+      ];
+      await deleteImageKeys(bucket, keysToDelete);
       return jsonResponse({ success: true, product: productToDelete, products: nextProducts });
+    }
+
+    if (pathname === '/delete-product-image') {
+      console.log('[worker] route /delete-product-image');
+      const body = await parseBody(request);
+      console.log('[worker] parsed delete image body type', body.type);
+      if (body.type === 'none') {
+        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400);
+      }
+
+      const data = body.value;
+      const id = String(getBodyValue(data, 'id') || '').trim();
+      const imageUrl = String(getBodyValue(data, 'imageUrl') || '').trim();
+      const imageKey = String(getBodyValue(data, 'imageKey') || '').trim();
+
+      const products = await readCatalog(bucket);
+      const index = products.findIndex((item) => item.id === id);
+      if (index < 0) {
+        return jsonResponse({ success: false, error: 'Product not found' }, 404);
+      }
+
+      const product = products[index];
+      const currentImages = Array.isArray(product.images) ? product.images.slice() : product.image ? [product.image] : [];
+      const currentKeys = Array.isArray(product.imageKeys)
+        ? product.imageKeys.slice()
+        : product.imageKey
+          ? [product.imageKey]
+          : [];
+
+      let removedKeys = [];
+      let nextImages = currentImages.slice();
+      let nextKeys = currentKeys.slice();
+
+      if (imageKey) {
+        nextKeys = nextKeys.filter((key) => {
+          const shouldKeep = key !== imageKey;
+          if (!shouldKeep) removedKeys.push(key);
+          return shouldKeep;
+        });
+        const removeIndex = currentKeys.findIndex((key) => key === imageKey);
+        if (removeIndex >= 0) {
+          nextImages.splice(removeIndex, 1);
+        }
+      } else if (imageUrl) {
+        const removeIndex = nextImages.findIndex((url) => url === imageUrl);
+        if (removeIndex >= 0) {
+          nextImages.splice(removeIndex, 1);
+          if (nextKeys.length > removeIndex) {
+            removedKeys.push(nextKeys[removeIndex]);
+            nextKeys.splice(removeIndex, 1);
+          }
+        }
+      }
+
+      if (removedKeys.length === 0) {
+        return jsonResponse({ success: false, error: 'Image not found' }, 404);
+      }
+
+      await deleteImageKeys(bucket, removedKeys);
+
+      const nextProduct = {
+        ...product,
+        images: nextImages,
+        imageKeys: nextKeys,
+        image: nextImages[0] || '',
+        imageKey: nextKeys[0] || '',
+      };
+
+      products[index] = nextProduct;
+      await writeCatalog(bucket, products);
+      console.log('[worker] product updated after image delete', { id, removedKeys });
+      return jsonResponse({ success: true, product: nextProduct, products });
     }
 
     console.warn('[worker] route not found', { pathname });
