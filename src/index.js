@@ -100,6 +100,15 @@ async function uploadImage(bucket, env, file, categoryId, productId) {
   };
 }
 
+async function uploadImages(bucket, env, files, categoryId, productId) {
+  const uploads = [];
+  for (const file of files || []) {
+    if (!file || typeof file.arrayBuffer !== 'function') continue;
+    uploads.push(await uploadImage(bucket, env, file, categoryId, productId));
+  }
+  return uploads;
+}
+
 async function deleteImageIfNeeded(bucket, previousImageKey, nextImageKey) {
   if (!previousImageKey || !nextImageKey || previousImageKey === nextImageKey) return;
   await bucket.delete(previousImageKey);
@@ -160,7 +169,10 @@ export default {
       }
 
       const data = body.value;
-      const file = body.type === 'formData' ? data.get('image') : null;
+      const imageFiles = body.type === 'formData'
+        ? (data.getAll('images') || []).filter((item) => item && typeof item === 'object' && typeof item.arrayBuffer === 'function')
+        : [];
+      const legacyFile = body.type === 'formData' ? data.get('image') : null;
       const id = String(getBodyValue(data, 'id') || '').trim();
       const name = String(getBodyValue(data, 'name') || '').trim();
       const category = String(getBodyValue(data, 'category') || '').trim();
@@ -174,12 +186,18 @@ export default {
 
       const products = await readCatalog(bucket);
       console.log('[worker] existing catalog count before add', { count: products.length });
-      const product = { id, name, category, categoryId, price, description, sizes, image: '', imageKey: '' };
+      const product = { id, name, category, categoryId, price, description, sizes, image: '', images: [], imageKey: '' };
 
-      if (file && typeof file === 'object' && 'arrayBuffer' in file) {
-        const upload = await uploadImage(bucket, env, file, categoryId, id);
-        product.image = upload.publicUrl;
-        product.imageKey = upload.objectKey;
+      const uploads = imageFiles.length > 0 ? await uploadImages(bucket, env, imageFiles, categoryId, id) : [];
+      if (legacyFile && typeof legacyFile === 'object' && 'arrayBuffer' in legacyFile && uploads.length === 0) {
+        const upload = await uploadImage(bucket, env, legacyFile, categoryId, id);
+        uploads.push(upload);
+      }
+
+      if (uploads.length > 0) {
+        product.image = uploads[0].publicUrl;
+        product.images = uploads.map((upload) => upload.publicUrl);
+        product.imageKey = uploads[0].objectKey;
       }
 
       products.push(product);
@@ -198,7 +216,10 @@ export default {
       }
 
       const data = body.value;
-      const file = body.type === 'formData' ? data.get('image') : null;
+      const imageFiles = body.type === 'formData'
+        ? (data.getAll('images') || []).filter((item) => item && typeof item === 'object' && typeof item.arrayBuffer === 'function')
+        : [];
+      const legacyFile = body.type === 'formData' ? data.get('image') : null;
       const id = String(getBodyValue(data, 'id') || '').trim();
       const name = String(getBodyValue(data, 'name') || '').trim();
       const category = String(getBodyValue(data, 'category') || '').trim();
@@ -229,13 +250,22 @@ export default {
         sizes,
       };
 
-      if (file && typeof file === 'object' && 'arrayBuffer' in file) {
-        const upload = await uploadImage(bucket, env, file, categoryId, id);
-        nextProduct.image = upload.publicUrl;
-        nextProduct.imageKey = upload.objectKey;
-        await deleteImageIfNeeded(bucket, existingImageKey, upload.objectKey);
+      const uploads = imageFiles.length > 0 ? await uploadImages(bucket, env, imageFiles, categoryId, id) : [];
+      if (legacyFile && typeof legacyFile === 'object' && 'arrayBuffer' in legacyFile && uploads.length === 0) {
+        const upload = await uploadImage(bucket, env, legacyFile, categoryId, id);
+        uploads.push(upload);
+      }
+
+      if (uploads.length > 0) {
+        nextProduct.image = uploads[0].publicUrl;
+        nextProduct.images = uploads.map((upload) => upload.publicUrl);
+        nextProduct.imageKey = uploads[0].objectKey;
+        await deleteImageIfNeeded(bucket, existingImageKey, uploads[0].objectKey);
       } else {
         nextProduct.image = products[index].image || '';
+        nextProduct.images = Array.isArray(products[index].images) && products[index].images.length > 0
+          ? products[index].images
+          : (products[index].image ? [products[index].image] : []);
         nextProduct.imageKey = products[index].imageKey || '';
       }
 
