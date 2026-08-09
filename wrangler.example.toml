@@ -1,0 +1,25 @@
+# Example Wrangler configuration (copy to wrangler.toml and fill values)
+name = "koorta-fe-worker"
+type = "javascript"
+account_id = "your_account_id_here"
+workers_dev = true
+
+# R2 bucket binding and recommended vars
+[[r2_buckets]]
+binding = "GARMENT_BUCKET"
+bucket_name = "your-r2-bucket-name"
+
+[vars]
+# Worker environment variables (set real secret values via Wrangler or Cloudflare dashboard)
+ADMIN_SECRET_KEY = "your_admin_secret_here"
+# Optional: customize the header the worker expects for admin requests
+ADMIN_HEADER_NAME = "X-Admin-Secret"
+# Optional: public base URL used when constructing uploaded image URLs
+R2_PUBLIC_BASE_URL = "https://<your-r2-public-host>"
+# Catalog caching (seconds)
+CATALOG_CACHE_TTL = "60"
+CATALOG_CACHE_STALE = "300"
+
+# Example build/upload settings
+[site]
+bucket = "./.output/public"
