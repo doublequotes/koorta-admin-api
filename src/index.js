@@ -1,16 +1,9 @@
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-Admin-Secret',
-  'Access-Control-Max-Age': '86400',
-};
-
-function jsonResponse(body, status = 200) {
+function jsonResponse(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
-      ...corsHeaders,
+      ...headers,
     },
   });
 }
@@ -130,13 +123,24 @@ export default {
       headers: Object.fromEntries(request.headers.entries()),
     });
 
+    const adminHeaderName = String(env.ADMIN_HEADER_NAME || 'X-Admin-Secret');
+    const catalogCacheTtl = Number(env.CATALOG_CACHE_TTL || 60);
+    const catalogCacheStale = Number(env.CATALOG_CACHE_STALE || 300);
+
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': `Content-Type, ${adminHeaderName}`,
+      'Access-Control-Max-Age': '86400',
+    };
+
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
     if (!env.GARMENT_BUCKET) {
       console.error('[worker] GARMENT_BUCKET binding missing');
-      return jsonResponse({ success: false, error: 'The GARMENT_BUCKET binding is missing.' }, 500);
+      return jsonResponse({ success: false, error: 'The GARMENT_BUCKET binding is missing.' }, 500, corsHeaders);
     }
 
     const bucket = env.GARMENT_BUCKET;
@@ -145,25 +149,48 @@ export default {
 
     if (request.method === 'GET' && pathname === '/catalog') {
       console.log('[worker] GET /catalog');
-      const products = await readCatalog(bucket);
-      console.log('[worker] catalog read result', { count: products.length });
-      return jsonResponse(products, 200);
+      try {
+        const cache = caches.default;
+        const cacheKey = new Request(request.url, { method: 'GET' });
+        const cached = await cache.match(cacheKey);
+        if (cached) {
+          console.log('[worker] serving catalog from edge cache');
+          return cached.clone();
+        }
+
+        const products = await readCatalog(bucket);
+        console.log('[worker] catalog read result', { count: products.length });
+
+        const headers = {
+          ...corsHeaders,
+          'content-type': 'application/json; charset=utf-8',
+          'Cache-Control': `public, max-age=${catalogCacheTtl}, stale-while-revalidate=${catalogCacheStale}`,
+        };
+
+        const resp = new Response(JSON.stringify(products), { status: 200, headers });
+        // put into edge cache (await to ensure it's stored)
+        await caches.default.put(cacheKey, resp.clone());
+        return resp;
+      } catch (err) {
+        console.error('[worker] error serving catalog', err);
+        return jsonResponse([], 200, corsHeaders);
+      }
     }
 
     if (request.method === 'GET' && pathname === '/') {
       console.log('[worker] health check');
-      return jsonResponse({ ok: true, message: 'garment-admin-api worker is running.' }, 200);
+      return jsonResponse({ ok: true, message: 'garment-admin-api worker is running.' }, 200, corsHeaders);
     }
 
-    const providedSecret = request.headers.get('X-Admin-Secret') || '';
-    console.log('[worker] auth check', { providedSecretLength: providedSecret.length, expectedSecretLength: String(env.ADMIN_SECRET_KEY || '').length });
+    const providedSecret = request.headers.get(adminHeaderName) || '';
+    console.log('[worker] auth check', { header: adminHeaderName, providedSecretLength: providedSecret.length, expectedSecretLength: String(env.ADMIN_SECRET_KEY || '').length });
     if (providedSecret !== env.ADMIN_SECRET_KEY) {
       console.warn('[worker] unauthorized request');
-      return jsonResponse({ success: false, error: 'Unauthorized' }, 401);
+      return jsonResponse({ success: false, error: 'Unauthorized' }, 401, corsHeaders);
     }
 
     if (request.method !== 'POST') {
-      return jsonResponse({ success: false, error: 'Method not allowed' }, 405);
+      return jsonResponse({ success: false, error: 'Method not allowed' }, 405, corsHeaders);
     }
 
     if (pathname === '/add-product') {
@@ -171,7 +198,7 @@ export default {
       const body = await parseBody(request);
       console.log('[worker] parsed body type', body.type);
       if (body.type === 'none') {
-        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400);
+        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400, corsHeaders);
       }
 
       const data = body.value;
@@ -211,7 +238,7 @@ export default {
       console.log('[worker] writing catalog');
       await writeCatalog(bucket, products);
       console.log('[worker] catalog written successfully');
-      return jsonResponse({ success: true, product, products });
+      return jsonResponse({ success: true, product, products }, 200, corsHeaders);
     }
 
     if (pathname === '/edit-product') {
@@ -219,7 +246,7 @@ export default {
       const body = await parseBody(request);
       console.log('[worker] parsed edit body type', body.type);
       if (body.type === 'none') {
-        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400);
+        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400, corsHeaders);
       }
 
       const data = body.value;
@@ -246,7 +273,7 @@ export default {
       console.log('[worker] existing catalog count before edit', { count: products.length, id });
       const index = products.findIndex((item) => item.id === id);
       if (index < 0) {
-        return jsonResponse({ success: false, error: 'Product not found' }, 404);
+        return jsonResponse({ success: false, error: 'Product not found' }, 404, corsHeaders);
       }
 
       const nextProduct = {
@@ -292,7 +319,7 @@ export default {
       console.log('[worker] writing catalog after edit');
       await writeCatalog(bucket, products);
       console.log('[worker] catalog written after edit');
-      return jsonResponse({ success: true, product: nextProduct, products });
+      return jsonResponse({ success: true, product: nextProduct, products }, 200, corsHeaders);
     }
 
     if (pathname === '/delete-product') {
@@ -300,7 +327,7 @@ export default {
       const body = await parseBody(request);
       console.log('[worker] parsed delete body type', body.type);
       if (body.type === 'none') {
-        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400);
+        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400, corsHeaders);
       }
 
       const data = body.value;
@@ -310,7 +337,7 @@ export default {
       const productToDelete = products.find((item) => item.id === id);
 
       if (!productToDelete) {
-        return jsonResponse({ success: false, error: 'Product not found' }, 404);
+        return jsonResponse({ success: false, error: 'Product not found' }, 404, corsHeaders);
       }
 
       const nextProducts = products.filter((item) => item.id !== id);
@@ -322,7 +349,7 @@ export default {
         ...(productToDelete.imageKey ? [productToDelete.imageKey] : []),
       ];
       await deleteImageKeys(bucket, keysToDelete);
-      return jsonResponse({ success: true, product: productToDelete, products: nextProducts });
+      return jsonResponse({ success: true, product: productToDelete, products: nextProducts }, 200, corsHeaders);
     }
 
     if (pathname === '/delete-product-image') {
@@ -330,7 +357,7 @@ export default {
       const body = await parseBody(request);
       console.log('[worker] parsed delete image body type', body.type);
       if (body.type === 'none') {
-        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400);
+        return jsonResponse({ success: false, error: 'Provide JSON or multipart/form-data.' }, 400, corsHeaders);
       }
 
       const data = body.value;
@@ -341,7 +368,7 @@ export default {
       const products = await readCatalog(bucket);
       const index = products.findIndex((item) => item.id === id);
       if (index < 0) {
-        return jsonResponse({ success: false, error: 'Product not found' }, 404);
+        return jsonResponse({ success: false, error: 'Product not found' }, 404, corsHeaders);
       }
 
       const product = products[index];
@@ -378,7 +405,7 @@ export default {
       }
 
       if (removedKeys.length === 0) {
-        return jsonResponse({ success: false, error: 'Image not found' }, 404);
+        return jsonResponse({ success: false, error: 'Image not found' }, 404, corsHeaders);
       }
 
       await deleteImageKeys(bucket, removedKeys);
@@ -394,10 +421,10 @@ export default {
       products[index] = nextProduct;
       await writeCatalog(bucket, products);
       console.log('[worker] product updated after image delete', { id, removedKeys });
-      return jsonResponse({ success: true, product: nextProduct, products });
+      return jsonResponse({ success: true, product: nextProduct, products }, 200, corsHeaders);
     }
 
     console.warn('[worker] route not found', { pathname });
-    return jsonResponse({ success: false, error: 'Not found' }, 404);
+    return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
   },
 };
