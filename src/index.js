@@ -216,10 +216,24 @@ export default {
         .split(',')
         .map((size) => size.trim())
         .filter(Boolean);
+      const specsRaw = getBodyValue(data, 'specs') || '';
+      let specs;
+      try {
+        specs = typeof specsRaw === 'string' && specsRaw.trim() ? JSON.parse(specsRaw) : undefined;
+      } catch (e) {
+        specs = undefined;
+      }
+      const specsRaw = getBodyValue(data, 'specs') || '';
+      let specs;
+      try {
+        specs = typeof specsRaw === 'string' && specsRaw.trim() ? JSON.parse(specsRaw) : undefined;
+      } catch (e) {
+        specs = undefined;
+      }
 
       const products = await readCatalog(bucket);
       console.log('[worker] existing catalog count before add', { count: products.length });
-      const product = { id, name, category, categoryId, price, description, sizes, image: '', images: [], imageKey: '', imageKeys: [] };
+      const product = { id, name, category, categoryId, price, description, sizes, specs: specs || undefined, image: '', images: [], imageKey: '', imageKeys: [] };
 
       const uploads = imageFiles.length > 0 ? await uploadImages(bucket, env, imageFiles, categoryId, id) : [];
       if (legacyFile && typeof legacyFile === 'object' && 'arrayBuffer' in legacyFile && uploads.length === 0) {
@@ -285,6 +299,7 @@ export default {
         price,
         description,
         sizes,
+        specs: typeof specs !== 'undefined' ? specs : products[index].specs,
       };
 
       const uploads = imageFiles.length > 0 ? await uploadImages(bucket, env, imageFiles, categoryId, id) : [];
