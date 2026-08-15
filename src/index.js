@@ -216,6 +216,21 @@ export default {
         .split(',')
         .map((size) => size.trim())
         .filter(Boolean);
+      const stockBySizeRaw = getBodyValue(data, 'stockBySize') || '';
+      let stockBySize = {};
+      try {
+        const parsed = typeof stockBySizeRaw === 'string' && stockBySizeRaw.trim() ? JSON.parse(stockBySizeRaw) : {};
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          stockBySize = parsed;
+        }
+      } catch (e) {
+        stockBySize = {};
+      }
+      const normalizedStockBySize = {};
+      for (const size of sizes) {
+        const rawValue = Number(stockBySize[size]);
+        normalizedStockBySize[size] = Number.isFinite(rawValue) && rawValue >= 0 ? Math.floor(rawValue) : 10;
+      }
       const specsRaw = getBodyValue(data, 'specs') || '';
       let specs;
       try {
@@ -235,6 +250,7 @@ export default {
         price,
         description,
         sizes,
+        stockBySize: Object.keys(normalizedStockBySize).length > 0 ? normalizedStockBySize : undefined,
         specs: specs && Object.keys(specs).length > 0 ? specs : undefined,
         image: '',
         images: [],
@@ -288,6 +304,21 @@ export default {
         .split(',')
         .map((size) => size.trim())
         .filter(Boolean);
+      const stockBySizeRaw = getBodyValue(data, 'stockBySize') || '';
+      let stockBySize = {};
+      try {
+        const parsed = typeof stockBySizeRaw === 'string' && stockBySizeRaw.trim() ? JSON.parse(stockBySizeRaw) : {};
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          stockBySize = parsed;
+        }
+      } catch (e) {
+        stockBySize = {};
+      }
+      const normalizedStockBySize = {};
+      for (const size of sizes) {
+        const rawValue = Number(stockBySize[size]);
+        normalizedStockBySize[size] = Number.isFinite(rawValue) && rawValue >= 0 ? Math.floor(rawValue) : 10;
+      }
       const specsRaw = getBodyValue(data, 'specs') || '';
       const existingImageKey = String(getBodyValue(data, 'imageKey') || '').trim();
 
@@ -320,6 +351,7 @@ export default {
         price,
         description,
         sizes,
+        stockBySize: Object.keys(normalizedStockBySize).length > 0 ? normalizedStockBySize : (products[index].stockBySize || undefined),
         specs: specs && typeof specs === 'object' && Object.keys(specs).length > 0 ? specs : undefined,
       };
 
