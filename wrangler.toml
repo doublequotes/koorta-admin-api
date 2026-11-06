@@ -4,6 +4,9 @@ compatibility_date = "2026-08-02"
 
 [vars]
 R2_PUBLIC_BASE_URL = "https://garment-bucket.koorta.com"
+ACCESS_ISSUER = "https://koortadotcom.cloudflareaccess.com"
+ACCESS_AUD = "1016bc0e09dd8e7703407cb47a90270907c16d523044f44f71b0ba3ac73acc03"
+ADMIN_UI_ORIGINS = "https://koorta.com"
 
 [[r2_buckets]]
 binding = "GARMENT_BUCKET"

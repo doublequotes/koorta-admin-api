@@ -10,10 +10,11 @@ binding = "GARMENT_BUCKET"
 bucket_name = "your-r2-bucket-name"
 
 [vars]
-# Worker environment variables (set real secret values via Wrangler or Cloudflare dashboard)
-ADMIN_SECRET_KEY = "your_admin_secret_here"
-# Optional: customize the header the worker expects for admin requests
-ADMIN_HEADER_NAME = "X-Admin-Secret"
+# Cloudflare Access JWT validation and browser CORS configuration.
+# Replace these with values from the Access application for the admin API.
+ACCESS_ISSUER = "https://koortadotcom.cloudflareaccess.com"
+ACCESS_AUD = "1016bc0e09dd8e7703407cb47a90270907c16d523044f44f71b0ba3ac73acc03"
+ADMIN_UI_ORIGINS = "https://koorta.com"
 # Optional: public base URL used when constructing uploaded image URLs
 R2_PUBLIC_BASE_URL = "https://<your-r2-public-host>"
 # Catalog caching (seconds)

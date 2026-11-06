@@ -113,25 +113,118 @@ async function deleteImageKeys(bucket, keys) {
   await Promise.all(keys.map((key) => key ? bucket.delete(key) : Promise.resolve()));
 }
 
+let accessSigningKeyCache;
+
+function decodeBase64Url(value) {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+  const decoded = atob(padded);
+  return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+}
+
+function getAccessIssuer(env) {
+  const issuer = String(env.ACCESS_ISSUER || '').trim().replace(/\/$/, '');
+  return /^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/i.test(issuer) ? issuer : '';
+}
+
+async function getAccessSigningKeys(issuer, forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && accessSigningKeyCache?.issuer === issuer && accessSigningKeyCache.expiresAt > now) {
+    return accessSigningKeyCache.keys;
+  }
+
+  const response = await fetch(`${issuer}/cdn-cgi/access/certs`);
+  if (!response.ok) {
+    throw new Error(`Cloudflare Access signing-key request failed with status ${response.status}.`);
+  }
+
+  const jwks = await response.json();
+  if (!Array.isArray(jwks.keys)) {
+    throw new Error('Cloudflare Access signing-key response was invalid.');
+  }
+
+  accessSigningKeyCache = {
+    issuer,
+    keys: jwks.keys,
+    expiresAt: now + 60 * 60 * 1000,
+  };
+  return accessSigningKeyCache.keys;
+}
+
+async function verifyAccessJwt(request, issuer, audiences) {
+  const token = request.headers.get('Cf-Access-Jwt-Assertion') || '';
+  const segments = token.split('.');
+  if (segments.length !== 3 || segments.some((segment) => !segment)) return false;
+
+  let header;
+  let claims;
+  try {
+    header = JSON.parse(new TextDecoder().decode(decodeBase64Url(segments[0])));
+    claims = JSON.parse(new TextDecoder().decode(decodeBase64Url(segments[1])));
+  } catch {
+    return false;
+  }
+
+  if (!header || typeof header !== 'object' || Array.isArray(header)
+    || !claims || typeof claims !== 'object' || Array.isArray(claims)) return false;
+  if (header.alg !== 'RS256' || typeof header.kid !== 'string') return false;
+
+  let keys = await getAccessSigningKeys(issuer);
+  let signingKey = keys.find((key) => key.kid === header.kid);
+  if (!signingKey) {
+    keys = await getAccessSigningKeys(issuer, true);
+    signingKey = keys.find((key) => key.kid === header.kid);
+  }
+  if (!signingKey || signingKey.kty !== 'RSA' || (signingKey.alg && signingKey.alg !== 'RS256')) return false;
+
+  const publicKey = await crypto.subtle.importKey(
+    'jwk',
+    signingKey,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['verify'],
+  );
+  const signedContent = new TextEncoder().encode(`${segments[0]}.${segments[1]}`);
+  let signature;
+  try {
+    signature = decodeBase64Url(segments[2]);
+  } catch {
+    return false;
+  }
+  const signatureIsValid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', publicKey, signature, signedContent);
+  if (!signatureIsValid) return false;
+
+  const now = Math.floor(Date.now() / 1000);
+  const tokenAudiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  return claims.iss === issuer
+    && tokenAudiences.some((audience) => audiences.includes(audience))
+    && typeof claims.exp === 'number'
+    && claims.exp > now
+    && (claims.nbf === undefined || (typeof claims.nbf === 'number' && claims.nbf <= now));
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    console.log('[worker] request received', {
-      method: request.method,
-      pathname: url.pathname,
-      host: url.host,
-      headers: Object.fromEntries(request.headers.entries()),
-    });
-
-    const adminHeaderName = String(env.ADMIN_HEADER_NAME || 'X-Admin-Secret');
     const catalogCacheTtl = Number(env.CATALOG_CACHE_TTL || 60);
     const catalogCacheStale = Number(env.CATALOG_CACHE_STALE || 300);
+    const requestOrigin = request.headers.get('Origin') || '';
+    const allowedAdminOrigins = String(env.ADMIN_UI_ORIGINS || '')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean);
 
     const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': `Content-Type, ${adminHeaderName}`,
+      'Access-Control-Allow-Headers': 'Content-Type',
       'Access-Control-Max-Age': '86400',
+      ...(requestOrigin && allowedAdminOrigins.includes(requestOrigin)
+        ? {
+          'Access-Control-Allow-Origin': requestOrigin,
+          'Access-Control-Allow-Credentials': 'true',
+          'Vary': 'Origin',
+        }
+        : {}),
     };
 
     if (request.method === 'OPTIONS') {
@@ -162,7 +255,7 @@ export default {
         console.log('[worker] catalog read result', { count: products.length });
 
         const headers = {
-          ...corsHeaders,
+          'Access-Control-Allow-Origin': '*',
           'content-type': 'application/json; charset=utf-8',
           'Cache-Control': `public, max-age=${catalogCacheTtl}, stale-while-revalidate=${catalogCacheStale}`,
         };
@@ -182,9 +275,28 @@ export default {
       return jsonResponse({ ok: true, message: 'garment-admin-api worker is running.' }, 200, corsHeaders);
     }
 
-    const providedSecret = request.headers.get(adminHeaderName) || '';
-    console.log('[worker] auth check', { header: adminHeaderName, providedSecretLength: providedSecret.length, expectedSecretLength: String(env.ADMIN_SECRET_KEY || '').length });
-    if (providedSecret !== env.ADMIN_SECRET_KEY) {
+    if (requestOrigin && !allowedAdminOrigins.includes(requestOrigin)) {
+      return jsonResponse({ success: false, error: 'Origin not allowed.' }, 403, corsHeaders);
+    }
+
+    const issuer = getAccessIssuer(env);
+    const audiences = String(env.ACCESS_AUD || '')
+      .split(',')
+      .map((audience) => audience.trim())
+      .filter(Boolean);
+    if (!issuer || audiences.length === 0) {
+      console.error('[worker] Cloudflare Access issuer or audience is not configured');
+      return jsonResponse({ success: false, error: 'Admin API authorization is not configured.' }, 503, corsHeaders);
+    }
+
+    let isAuthorized;
+    try {
+      isAuthorized = await verifyAccessJwt(request, issuer, audiences);
+    } catch (error) {
+      console.error('[worker] Cloudflare Access JWT verification failed', error);
+      return jsonResponse({ success: false, error: 'Admin authorization is temporarily unavailable.' }, 503, corsHeaders);
+    }
+    if (!isAuthorized) {
       console.warn('[worker] unauthorized request');
       return jsonResponse({ success: false, error: 'Unauthorized' }, 401, corsHeaders);
     }
