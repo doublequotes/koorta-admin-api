@@ -324,6 +324,11 @@ export default {
       const categoryId = String(getBodyValue(data, 'categoryId') || '').trim();
       const description = String(getBodyValue(data, 'description') || '').trim();
       const price = Number(getBodyValue(data, 'price') || 0);
+      const mrpRaw = getBodyValue(data, 'mrp');
+      const mrp = mrpRaw === undefined || mrpRaw === null || mrpRaw === '' ? price : Number(mrpRaw);
+      if (!Number.isFinite(price) || price < 200 || !Number.isFinite(mrp) || mrp < price) {
+        return jsonResponse({ success: false, error: 'Price must be at least ₹200 and MRP must be equal to or greater than price.' }, 400, corsHeaders);
+      }
       const sizes = String(getBodyValue(data, 'sizes') || '')
         .split(',')
         .map((size) => size.trim())
@@ -360,6 +365,7 @@ export default {
         category,
         categoryId,
         price,
+        mrp,
         description,
         sizes,
         stockBySize: Object.keys(normalizedStockBySize).length > 0 ? normalizedStockBySize : undefined,
@@ -412,6 +418,7 @@ export default {
       const categoryId = String(getBodyValue(data, 'categoryId') || '').trim();
       const description = String(getBodyValue(data, 'description') || '').trim();
       const price = Number(getBodyValue(data, 'price') || 0);
+      const mrpRaw = getBodyValue(data, 'mrp');
       const sizes = String(getBodyValue(data, 'sizes') || '')
         .split(',')
         .map((size) => size.trim())
@@ -454,6 +461,14 @@ export default {
         return jsonResponse({ success: false, error: 'Product not found' }, 404, corsHeaders);
       }
 
+      const existingMrp = Number(products[index].mrp) || Number(products[index].price);
+      const mrp = mrpRaw === undefined || mrpRaw === null || mrpRaw === ''
+        ? existingMrp
+        : Number(mrpRaw);
+      if (!Number.isFinite(price) || price < 200 || !Number.isFinite(mrp) || mrp < price) {
+        return jsonResponse({ success: false, error: 'Price must be at least ₹200 and MRP must be equal to or greater than price.' }, 400, corsHeaders);
+      }
+
       const nextProduct = {
         ...products[index],
         id,
@@ -461,6 +476,7 @@ export default {
         category,
         categoryId,
         price,
+        mrp,
         description,
         sizes,
         stockBySize: Object.keys(normalizedStockBySize).length > 0 ? normalizedStockBySize : (products[index].stockBySize || undefined),
